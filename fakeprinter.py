@@ -15,6 +15,7 @@ from ippserver.behaviour import SaveFilePrinter
 
 # Configuration
 PRINTER_NAME = "HP LaserJet Pro M404dn"
+PRINTER_DESCRIPTION = "1st Floor Copy Room"
 PORT = 6310
 SAVE_DIR = "./print_jobs"
 PRINTER_UUID = "82c9bd0f-e313-4a2b-be52-8474a31d481c"
@@ -56,7 +57,7 @@ def sanitize_hostname(hostname):
     return sanitized.lower()
 
 
-def advertise_printer(hostname, ip, port, printer_name, uuid):
+def advertise_printer(hostname, ip, port, printer_name, printer_description, uuid):
     """Advertise the printer via Bonjour/mDNS with AirPrint support"""
     # Support both IPv4 and IPv6 - iOS prefers IPv6 and Apple's spec expects both
     zeroconf = Zeroconf()
@@ -76,7 +77,7 @@ def advertise_printer(hostname, ip, port, printer_name, uuid):
         b"rp": b"printers/fake_printer",
         b"ty": printer_name.encode(),
         b"adminurl": f"http://{hostname}:{port}/".encode(),
-        b"note": b"HP LaserJet Pro M404dn",
+        b"note": printer_description.encode(),
         b"pdl": b"application/pdf,image/jpeg,image/urf",  # Include image/urf for AirPrint discovery
         b"UUID": uuid.encode(),
         b"Color": b"T",
@@ -90,7 +91,7 @@ def advertise_printer(hostname, ip, port, printer_name, uuid):
         b"air": b"none",  # Authentication method: none (not an "enable" flag)
         b"kind": b"document,envelope,photo",
         b"priority": b"50",
-        b"product": b"(HP LaserJet Pro M404dn)",
+        b"product": f"({printer_name})".encode(),
         b"usb_MFG": b"HP",
         b"usb_MDL": b"LaserJet Pro M404dn",
     }
@@ -189,7 +190,7 @@ def main():
 
     # Advertise via Bonjour
     zeroconf, service_info = advertise_printer(
-        hostname, local_ip, PORT, PRINTER_NAME, PRINTER_UUID
+        hostname, local_ip, PORT, PRINTER_NAME, PRINTER_DESCRIPTION, PRINTER_UUID
     )
 
     # Create the printer behavior (save files and optionally convert to PDF)
