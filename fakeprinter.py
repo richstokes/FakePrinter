@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Fake IPP Printer using ippserver library
+Virtual IPP Printer using ippserver library
 Receives print jobs and saves them to ./print_jobs/ directory
 Optionally converts PostScript to PDF using ghostscript
 """
@@ -34,15 +34,42 @@ def get_local_ip():
         return "127.0.0.1"
 
 
+def sanitize_hostname(hostname):
+    """Sanitize hostname to be DNS-compliant (RFC 1123).
+    Hostnames must contain only letters, digits, and hyphens,
+    and must start and end with a letter or digit.
+    """
+    # Remove .local suffix if present
+    if hostname.endswith(".local"):
+        hostname = hostname[:-6]
+
+    # Replace invalid characters with hyphens
+    sanitized = "".join(c if c.isalnum() else "-" for c in hostname)
+
+    # Remove leading/trailing hyphens
+    sanitized = sanitized.strip("-")
+
+    # If empty or invalid, use fallback
+    if not sanitized or not sanitized[0].isalnum():
+        sanitized = "fakeprinter"
+
+    return sanitized.lower()
+
+
 def advertise_printer(hostname, ip, port, printer_name, uuid):
-    """Advertise the printer via Bonjour/mDNS"""
+    """Advertise the printer via Bonjour/mDNS with AirPrint support"""
+    # Support both IPv4 and IPv6 - iOS prefers IPv6 and Apple's spec expects both
     zeroconf = Zeroconf()
 
-    # Create service info
-    service_type = "_ipp._tcp.local."
-    service_name = f"{printer_name}.{service_type}"
+    # For AirPrint, iOS looks for the _universal subtype
+    # The type must be in the format: _<subtype>._sub._<service>._<protocol>.local.
+    # The service name still uses the base type (_ipp._tcp.local.)
+    airprint_type = "_universal._sub._ipp._tcp.local."
+    base_type = "_ipp._tcp.local."
+    service_name = f"{printer_name}.{base_type}"
 
-    # TXT records for IPP printer
+    # TXT records for IPP printer with AirPrint support
+    # URF (Universal Raster Format) is REQUIRED for AirPrint on iOS
     txt = {
         b"txtvers": b"1",
         b"qtotal": b"1",
@@ -50,33 +77,44 @@ def advertise_printer(hostname, ip, port, printer_name, uuid):
         b"ty": printer_name.encode(),
         b"adminurl": f"http://{hostname}:{port}/".encode(),
         b"note": b"HP LaserJet Pro M404dn",
-        b"pdl": b"application/pdf,application/postscript",
+        b"pdl": b"application/pdf,image/jpeg,image/urf",  # Include image/urf for AirPrint discovery
         b"UUID": uuid.encode(),
         b"Color": b"T",
         b"Duplex": b"F",
         b"Staple": b"F",
         b"Copies": b"T",
         b"printer-state": b"3",  # idle
-        b"printer-type": b"0x0",
+        b"printer-type": b"0x809046",  # AirPrint capable printer
+        # AirPrint-specific keys
+        b"URF": b"CP1,MT1-8-11,OB9,OFU0,PQ4,RS360,SRGB24,V1.4,W8,DM3",  # Required for AirPrint!
+        b"air": b"none",  # Authentication method: none (not an "enable" flag)
+        b"kind": b"document,envelope,photo",
+        b"priority": b"50",
+        b"product": b"(HP LaserJet Pro M404dn)",
+        b"usb_MFG": b"HP",
+        b"usb_MDL": b"LaserJet Pro M404dn",
     }
 
+    # Register IPP service with AirPrint subtype
+    # Python-zeroconf registers both the base type and subtype PTR records automatically
     info = ServiceInfo(
-        service_type,
-        service_name,
+        airprint_type,  # Type includes the _universal subtype for iOS discovery
+        service_name,  # Name uses the base _ipp._tcp.local. type
         addresses=[socket.inet_aton(ip)],
         port=port,
         properties=txt,
         server=hostname + ".",  # FQDN with trailing dot
     )
 
-    print(f"Advertising printer:")
-    print(f"  Service: {service_name}")
+    print(f"Advertising printer with AirPrint support:")
+    print(f"  Service name: {service_name}")
+    print(f"  Service type: {airprint_type}")
     print(f"  Hostname: {hostname}")
     print(f"  IP: {ip}")
     print(f"  Port: {port}")
 
     zeroconf.register_service(info)
-    print(f"  -> Bonjour service registered successfully\n")
+    print(f"  -> Bonjour service registered successfully (AirPrint enabled)\n")
 
     return zeroconf, info
 
@@ -134,10 +172,13 @@ def main():
     os.makedirs(SAVE_DIR, exist_ok=True)
 
     # Get local network info
-    hostname = socket.gethostname()
-    if not hostname.endswith(".local"):
-        hostname = hostname + ".local"
+    raw_hostname = socket.gethostname()
+    sanitized = sanitize_hostname(raw_hostname)
+    hostname = f"{sanitized}.local"
     local_ip = get_local_ip()
+
+    logging.info(f"Original hostname: {raw_hostname}")
+    logging.info(f"Sanitized hostname: {hostname}")
 
     # Advertise via Bonjour
     zeroconf, service_info = advertise_printer(
