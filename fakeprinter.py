@@ -128,7 +128,15 @@ class PDFConvertingPrinter(SaveFilePrinter):
 
     def run_after_saving(self, ps_filename, ipp_request):
         """Called after saving the PostScript file"""
+        # Log the print job
+        print(f"\n📄 Print job received!")
+        print(f"   File: {ps_filename}")
+        print(f"   Size: {os.path.getsize(ps_filename)} bytes")
+        if hasattr(ipp_request, "operation_id"):
+            print(f"   Operation: {ipp_request.operation_id}")
+
         if not self.convert_to_pdf:
+            print()
             return
 
         # Convert PS to PDF using ghostscript
@@ -153,18 +161,20 @@ class PDFConvertingPrinter(SaveFilePrinter):
             )
 
             if result.returncode == 0:
-                logging.info(f"Converted to PDF: {pdf_filename}")
+                print(f"   ✅ Converted to PDF: {pdf_filename}")
                 # Optionally delete the PostScript file
                 # os.remove(ps_filename)
             else:
-                logging.error(f"Ghostscript conversion failed: {result.stderr}")
+                print(f"   ❌ Ghostscript conversion failed: {result.stderr}")
         except FileNotFoundError:
-            logging.warning(
-                "Ghostscript (gs) not found. Install with: brew install ghostscript"
+            print(
+                "   ⚠️  Ghostscript (gs) not found. Install with: brew install ghostscript"
             )
-            logging.info(f"PostScript file saved as: {ps_filename}")
+            print(f"   PostScript file saved as: {ps_filename}")
         except Exception as e:
-            logging.error(f"Error converting to PDF: {e}")
+            print(f"   ❌ Error converting to PDF: {e}")
+
+        print()
 
 
 def main():
@@ -176,9 +186,6 @@ def main():
     sanitized = sanitize_hostname(raw_hostname)
     hostname = f"{sanitized}.local"
     local_ip = get_local_ip()
-
-    logging.info(f"Original hostname: {raw_hostname}")
-    logging.info(f"Sanitized hostname: {hostname}")
 
     # Advertise via Bonjour
     zeroconf, service_info = advertise_printer(
