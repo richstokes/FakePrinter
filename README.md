@@ -5,7 +5,7 @@ Creates a fake/virtual printer on the network. Receives print jobs and writes th
 
 
 ## Install
-`pipenv install`
+`pipenv install`  
 `brew install ghostscript` (if you want PDF output)
 
 

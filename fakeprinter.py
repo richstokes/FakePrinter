@@ -9,6 +9,8 @@ import os
 import socket
 import subprocess
 import logging
+from io import BytesIO
+from http.client import HTTPResponse
 from zeroconf import ServiceInfo, Zeroconf
 from ippserver.server import IPPServer, IPPRequestHandler
 from ippserver.behaviour import SaveFilePrinter
@@ -120,6 +122,159 @@ def advertise_printer(hostname, ip, port, printer_name, printer_description, uui
     return zeroconf, info
 
 
+class ChunkedIPPRequestHandler(IPPRequestHandler):
+    """
+    Wrapper for IPPRequestHandler that handles Transfer-Encoding: chunked.
+    iOS sends chunked IPP requests without Content-Length, which breaks
+    many BaseHTTPRequestHandler-based servers that don't decode chunks.
+    """
+
+    def parse_request(self):
+        """Override to handle chunked transfer encoding before processing IPP."""
+        # Call parent to parse HTTP headers
+        if not super().parse_request():
+            return False
+
+        # Debug: print all headers
+        transfer_encoding = self.headers.get("Transfer-Encoding", "")
+        content_length = self.headers.get("Content-Length", "")
+
+        print(
+            f"   📋 Headers: Transfer-Encoding='{transfer_encoding}', Content-Length='{content_length}'"
+        )
+
+        # Only decode if EXACTLY "chunked" transfer encoding AND no Content-Length
+        # Must be case-insensitive exact match, not just substring
+        has_chunked = transfer_encoding.strip().lower() == "chunked"
+        has_content_length = bool(content_length)
+
+        if has_chunked and not has_content_length:
+            print(f"   🔄 Bypassing chunked decoding - reading raw stream...")
+            try:
+                # iOS appears to send chunked encoding header but not actual chunked format
+                # Just read all available data directly
+                # First, peek at what we have
+                initial_peek = self.rfile.read(20)
+                print(
+                    f"      First 20 bytes: {initial_peek.hex()} = {initial_peek[:10]}"
+                )
+
+                # Check if this looks like IPP data (starts with version bytes 0x01xx or 0x02xx)
+                if len(initial_peek) >= 2 and initial_peek[0] in (0x01, 0x02):
+                    print(
+                        f"      ✅ Detected IPP protocol data, reading without chunk decoding..."
+                    )
+                    # Read the rest of the data
+                    remaining = self.rfile.read()
+                    full_body = initial_peek + remaining
+
+                    # Decode IPP operation from bytes 2-3 (big-endian 16-bit integer)
+                    if len(full_body) >= 4:
+                        operation_id = (full_body[2] << 8) | full_body[3]
+                        operation_names = {
+                            0x0002: "Print-Job",
+                            0x000B: "Get-Printer-Attributes",
+                            0x0004: "Validate-Job",
+                            0x0008: "Cancel-Job",
+                            0x0009: "Get-Job-Attributes",
+                            0x000A: "Get-Jobs",
+                        }
+                        op_name = operation_names.get(
+                            operation_id, f"Unknown-0x{operation_id:04x}"
+                        )
+                        print(
+                            f"      📋 IPP Operation: {op_name} (0x{operation_id:04x})"
+                        )
+
+                    # Replace rfile with full body
+                    self.rfile = BytesIO(full_body)
+                    self.headers["Content-Length"] = str(len(full_body))
+                    print(f"      ✅ Read {len(full_body)} bytes of IPP data")
+
+                else:
+                    # Try traditional chunked decoding
+                    print(f"      Attempting traditional chunked decoding...")
+                    # Put back what we read
+                    self.rfile = BytesIO(initial_peek + self.rfile.read())
+
+                    chunks = []
+                    chunk_count = 0
+
+                    while True:
+                        # Read chunk size line (hex number, possibly followed by ;extensions)
+                        size_line = self.rfile.readline()
+                        if not size_line:
+                            print(f"      No more data to read")
+                            break
+
+                        # Remove whitespace
+                        size_line = size_line.strip()
+                        if not size_line:
+                            print(f"      Empty line, continuing...")
+                            continue
+
+                        # Parse chunk size (hex), ignore any extensions after ;
+                        try:
+                            chunk_size_str = size_line.split(b";")[0].strip()
+                            chunk_size = int(chunk_size_str, 16)
+                            print(
+                                f"      Chunk {chunk_count}: size={chunk_size} bytes (hex: {chunk_size_str})"
+                            )
+                        except ValueError as ve:
+                            print(f"      ❌ Invalid hex chunk size: {size_line[:50]}")
+                            raise ValueError(f"Invalid chunk size: {size_line[:50]}")
+
+                        # If chunk size is 0, we're done
+                        if chunk_size == 0:
+                            print(f"      Terminating chunk (size=0) received")
+                            # Read any trailing headers and final CRLF
+                            while True:
+                                trailer = self.rfile.readline()
+                                if not trailer or trailer in (b"\r\n", b"\n"):
+                                    break
+                            break
+
+                        # Read chunk data
+                        chunk_data = self.rfile.read(chunk_size)
+                        actual_len = len(chunk_data)
+                        if actual_len != chunk_size:
+                            print(
+                                f"      ❌ Expected {chunk_size} bytes, got {actual_len}"
+                            )
+                            raise ValueError(
+                                f"Expected {chunk_size} bytes, got {actual_len}"
+                            )
+
+                        chunks.append(chunk_data)
+                        chunk_count += 1
+
+                        # Read trailing CRLF after chunk data
+                        trailing = self.rfile.readline()
+
+                    # Combine all chunks
+                    full_body = b"".join(chunks)
+
+                    # Replace rfile with BytesIO containing decoded body
+                    self.rfile = BytesIO(full_body)
+
+                    # Add Content-Length header for IPP handler
+                    self.headers["Content-Length"] = str(len(full_body))
+
+                    print(
+                        f"   ✅ Decoded {chunk_count} chunks: {len(full_body)} total bytes"
+                    )
+
+            except Exception as e:
+                print(f"   ❌ Error decoding chunked request: {e}")
+                import traceback
+
+                traceback.print_exc()
+                self.send_error(400, f"Bad chunked encoding: {e}")
+                return False
+
+        return True
+
+
 class PDFConvertingPrinter(SaveFilePrinter):
     """Extends SaveFilePrinter to convert PostScript to PDF using ghostscript"""
 
@@ -209,7 +364,7 @@ def main():
     try:
         server = IPPServer(
             address=("0.0.0.0", PORT),
-            request_handler=IPPRequestHandler,
+            request_handler=ChunkedIPPRequestHandler,
             behaviour=printer_behavior,
         )
 
